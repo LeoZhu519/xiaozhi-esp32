@@ -153,7 +153,7 @@ dependencies:
 
   ## Required IDF version
   idf:
-    version: '>=5.4.0'
+    version: '>=6.0.1'
   kevincoooool/esp_lcd_st7102:
     version: ^1.0.4
     rules:
