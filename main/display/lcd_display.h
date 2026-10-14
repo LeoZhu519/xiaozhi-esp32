@@ -34,6 +34,7 @@ protected:
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
     lv_obj_t* big_char_container_ = nullptr;
     esp_timer_handle_t big_char_timer_ = nullptr;
+    int64_t big_char_show_time_ = 0;
 
     void InitializeLcdThemes();
     virtual bool Lock(int timeout_ms = 0) override;

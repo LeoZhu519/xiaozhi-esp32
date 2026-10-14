@@ -1154,13 +1154,21 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
+#if LV_USE_TINY_TTF
+extern const uint8_t kaiti_subset_ttf_start[] asm("_binary_kaiti_subset_ttf_start");
+extern const uint8_t kaiti_subset_ttf_end[]   asm("_binary_kaiti_subset_ttf_end");
+#endif
+
 void LcdDisplay::SetStatus(const char* status) {
     LvglDisplay::SetStatus(status);
     if (big_char_container_ != nullptr && status != nullptr) {
-        if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
-            strstr(status, "聆听") != nullptr ||
-            strstr(status, "Listen") != nullptr) {
-            DismissBigCharacter();
+        int64_t elapsed_us = esp_timer_get_time() - big_char_show_time_;
+        if (elapsed_us >= 6000000LL) {
+            if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
+                strstr(status, "聆听") != nullptr ||
+                strstr(status, "Listen") != nullptr) {
+                DismissBigCharacter();
+            }
         }
     }
 }
@@ -1213,6 +1221,9 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
         big_char_container_ = nullptr;
     }
 
+    // Record show timestamp for anti-premature-dismissal lock (6 seconds)
+    big_char_show_time_ = esp_timer_get_time();
+
     auto screen = lv_screen_active();
     big_char_container_ = lv_obj_create(screen);
     lv_obj_set_size(big_char_container_, 180, 180);
@@ -1245,44 +1256,45 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
     lv_obj_set_style_pad_all(line_v, 0, 0);
     lv_obj_clear_flag(line_v, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Label for target character
+    // Label for target character (136px crisp TrueType vector font)
     lv_obj_t* label = lv_label_create(big_char_container_);
     lv_label_set_text(label, ch.c_str());
     lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
 
-    LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    if (lvgl_theme != nullptr && lvgl_theme->text_font() != nullptr) {
-        lv_obj_set_style_text_font(label, lvgl_theme->text_font()->font(), 0);
+#if LV_USE_TINY_TTF
+    static lv_font_t* s_kaiti_font_136 = nullptr;
+    if (s_kaiti_font_136 == nullptr) {
+        size_t ttf_size = kaiti_subset_ttf_end - kaiti_subset_ttf_start;
+        s_kaiti_font_136 = lv_tiny_ttf_create_data(kaiti_subset_ttf_start, ttf_size, 136);
+        if (s_kaiti_font_136 == nullptr) {
+            ESP_LOGE(TAG, "Failed to create tiny_ttf font of size 136");
+        }
+    }
+    if (s_kaiti_font_136 != nullptr) {
+        lv_obj_set_style_text_font(label, s_kaiti_font_136, 0);
+    } else
+#endif
+    {
+        LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        if (lvgl_theme != nullptr && lvgl_theme->text_font() != nullptr) {
+            lv_obj_set_style_text_font(label, lvgl_theme->text_font()->font(), 0);
+        }
     }
 
-    lv_obj_update_layout(label);
-    int32_t w = lv_obj_get_width(label);
-    int32_t h = lv_obj_get_height(label);
-    if (w > 0 && h > 0) {
-        lv_obj_set_style_transform_pivot_x(label, w / 2, 0);
-        lv_obj_set_style_transform_pivot_y(label, h / 2, 0);
-    }
-
-    // Scale up: base font is 30px.
-    // 1 char: scale 3.5x (896 / 256) -> ~105px
-    // 2 chars: scale 2.2x (563 / 256) -> fits 180px
-    // 3+ chars: scale 1.5x (384 / 256)
-    int32_t scale = 896;
-    if (ch.size() > 6) {
-        scale = 384;
-    } else if (ch.size() > 3) {
-        scale = 563;
-    }
-    lv_obj_set_style_transform_scale(label, scale, 0);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
-    // Start 8-second timer (8000 ms = 8,000,000 us)
+    // Start 12-second timer (12000 ms = 12,000,000 us)
     if (big_char_timer_ != nullptr) {
-        esp_timer_start_once(big_char_timer_, 8000 * 1000);
+        esp_timer_start_once(big_char_timer_, 12000 * 1000);
     }
 }
 
 void LcdDisplay::SetEmotion(const char* emotion) {
+    if (big_char_container_ != nullptr) {
+        // Prevent emotion ball from overriding the active big character card
+        return;
+    }
+
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!",
                  emotion);
