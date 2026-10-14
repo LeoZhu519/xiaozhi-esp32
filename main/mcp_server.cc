@@ -89,6 +89,21 @@ void McpServer::AddCommonTools() {
                 });
     }
 
+    if (display) {
+        AddTool("self.screen.show_character",
+                "当用户询问汉字怎么写、汉字笔画结构，或要求在屏幕上显示指定大字时调用此工具。",
+                PropertyList({Property("character", kPropertyTypeString)}),
+                [](const PropertyList& properties) -> ReturnValue {
+                    auto character = properties["character"].value<std::string>();
+                    auto disp = Display::GetInstance();
+                    if (disp != nullptr) {
+                        disp->ShowBigCharacter(character);
+                        return true;
+                    }
+                    return false;
+                });
+    }
+
     auto camera = board.GetCamera();
     if (camera) {
         AddTool("self.camera.take_photo",

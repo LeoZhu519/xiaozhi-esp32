@@ -32,6 +32,8 @@ protected:
     esp_timer_handle_t preview_timer_ = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
+    lv_obj_t* big_char_container_ = nullptr;
+    esp_timer_handle_t big_char_timer_ = nullptr;
 
     void InitializeLcdThemes();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -44,7 +46,10 @@ protected:
 
 public:
     ~LcdDisplay();
+    virtual void SetStatus(const char* status) override;
     virtual void SetEmotion(const char* emotion) override;
+    virtual void ShowBigCharacter(const std::string& ch) override;
+    virtual void DismissBigCharacter();
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;

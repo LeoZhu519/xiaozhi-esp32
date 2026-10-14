@@ -95,6 +95,20 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
         .skip_unhandled_events = false,
     };
     esp_timer_create(&preview_timer_args, &preview_timer_);
+
+    // Create a timer to dismiss big character display after timeout
+    esp_timer_create_args_t big_char_timer_args = {
+        .callback =
+            [](void* arg) {
+                LcdDisplay* display = static_cast<LcdDisplay*>(arg);
+                display->DismissBigCharacter();
+            },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "big_char_timer",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&big_char_timer_args, &big_char_timer_);
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -333,6 +347,17 @@ LcdDisplay::~LcdDisplay() {
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
         esp_timer_delete(preview_timer_);
+    }
+
+    if (big_char_timer_ != nullptr) {
+        esp_timer_stop(big_char_timer_);
+        esp_timer_delete(big_char_timer_);
+        big_char_timer_ = nullptr;
+    }
+
+    if (big_char_container_ != nullptr) {
+        lv_obj_del(big_char_container_);
+        big_char_container_ = nullptr;
     }
 
     if (preview_image_ != nullptr) {
@@ -1129,6 +1154,134 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
+void LcdDisplay::SetStatus(const char* status) {
+    LvglDisplay::SetStatus(status);
+    if (big_char_container_ != nullptr && status != nullptr) {
+        if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
+            strstr(status, "聆听") != nullptr ||
+            strstr(status, "Listen") != nullptr) {
+            DismissBigCharacter();
+        }
+    }
+}
+
+void LcdDisplay::DismissBigCharacter() {
+    DisplayLockGuard lock(this);
+    if (big_char_timer_ != nullptr) {
+        esp_timer_stop(big_char_timer_);
+    }
+    if (big_char_container_ != nullptr) {
+        lv_obj_del(big_char_container_);
+        big_char_container_ = nullptr;
+    }
+    // Restore emoji_box_
+    if (emoji_box_ != nullptr) {
+        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (gif_controller_) {
+        gif_controller_->Start();
+    }
+}
+
+void LcdDisplay::ShowBigCharacter(const std::string& ch) {
+    if (ch.empty()) {
+        DismissBigCharacter();
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+
+    // Stop current dismiss timer if active
+    if (big_char_timer_ != nullptr) {
+        esp_timer_stop(big_char_timer_);
+    }
+
+    // Hide emoji controls
+    if (gif_controller_) {
+        gif_controller_->Stop();
+    }
+    if (emoji_box_ != nullptr) {
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (preview_image_ != nullptr) {
+        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Recreate big_char_container_ if it already exists
+    if (big_char_container_ != nullptr) {
+        lv_obj_del(big_char_container_);
+        big_char_container_ = nullptr;
+    }
+
+    auto screen = lv_screen_active();
+    big_char_container_ = lv_obj_create(screen);
+    lv_obj_set_size(big_char_container_, 180, 180);
+    lv_obj_align(big_char_container_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(big_char_container_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(big_char_container_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(big_char_container_, 6, 0);
+    lv_obj_set_style_border_color(big_char_container_, lv_color_hex(0x882222), 0);
+    lv_obj_set_style_border_width(big_char_container_, 2, 0);
+    lv_obj_set_style_pad_all(big_char_container_, 0, 0);
+    lv_obj_clear_flag(big_char_container_, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Tianzige horizontal cross line (1px, #882222)
+    lv_obj_t* line_h = lv_obj_create(big_char_container_);
+    lv_obj_set_size(line_h, 176, 1);
+    lv_obj_align(line_h, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(line_h, lv_color_hex(0x882222), 0);
+    lv_obj_set_style_bg_opa(line_h, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(line_h, 0, 0);
+    lv_obj_set_style_pad_all(line_h, 0, 0);
+    lv_obj_clear_flag(line_h, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Tianzige vertical cross line (1px, #882222)
+    lv_obj_t* line_v = lv_obj_create(big_char_container_);
+    lv_obj_set_size(line_v, 1, 176);
+    lv_obj_align(line_v, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(line_v, lv_color_hex(0x882222), 0);
+    lv_obj_set_style_bg_opa(line_v, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(line_v, 0, 0);
+    lv_obj_set_style_pad_all(line_v, 0, 0);
+    lv_obj_clear_flag(line_v, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Label for target character
+    lv_obj_t* label = lv_label_create(big_char_container_);
+    lv_label_set_text(label, ch.c_str());
+    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+
+    LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    if (lvgl_theme != nullptr && lvgl_theme->text_font() != nullptr) {
+        lv_obj_set_style_text_font(label, lvgl_theme->text_font()->font(), 0);
+    }
+
+    lv_obj_update_layout(label);
+    int32_t w = lv_obj_get_width(label);
+    int32_t h = lv_obj_get_height(label);
+    if (w > 0 && h > 0) {
+        lv_obj_set_style_transform_pivot_x(label, w / 2, 0);
+        lv_obj_set_style_transform_pivot_y(label, h / 2, 0);
+    }
+
+    // Scale up: base font is 30px.
+    // 1 char: scale 3.5x (896 / 256) -> ~105px
+    // 2 chars: scale 2.2x (563 / 256) -> fits 180px
+    // 3+ chars: scale 1.5x (384 / 256)
+    int32_t scale = 896;
+    if (ch.size() > 6) {
+        scale = 384;
+    } else if (ch.size() > 3) {
+        scale = 563;
+    }
+    lv_obj_set_style_transform_scale(label, scale, 0);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    // Start 8-second timer (8000 ms = 8,000,000 us)
+    if (big_char_timer_ != nullptr) {
+        esp_timer_start_once(big_char_timer_, 8000 * 1000);
+    }
+}
+
 void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!",
@@ -1215,6 +1368,9 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
     }
 #endif
+    if (big_char_container_ != nullptr && emoji_box_ != nullptr) {
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void LcdDisplay::SetTheme(Theme* theme) {

@@ -63,6 +63,7 @@ jobs:
 
           # Keep the full manual matrix out of environment variables.
           python scripts/build.py --select-changed < "$CHANGED_FILE" > "$RUNNER_TEMP/variants.json"
+          python -c 'import json, sys; p = sys.argv[1]; data = json.load(open(p)); b = [x for x in data if "bread-compact-wifi-lcd" in x.get("board", "")]; json.dump(b if b else data, open(p, "w"))' "$RUNNER_TEMP/variants.json"
           {
             printf 'variants='
             cat "$RUNNER_TEMP/variants.json"

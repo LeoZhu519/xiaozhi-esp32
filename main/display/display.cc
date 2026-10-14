@@ -17,6 +17,10 @@ Display::Display() {}
 
 Display::~Display() {}
 
+Display* Display::GetInstance() {
+    return Board::GetInstance().GetDisplay();
+}
+
 void Display::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
 
 void Display::SetStatus(const char* status) { ESP_LOGW(TAG, "SetStatus: %s", status); }
