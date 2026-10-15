@@ -50,8 +50,6 @@ protected:
     TaskHandle_t stroke_fetch_task_ = nullptr;
     int64_t big_char_show_time_ = 0;
 
-    struct StrokePoint { int16_t x; int16_t y; };
-    using Stroke = std::vector<StrokePoint>;
     std::vector<Stroke> stroke_data_;
     bool stroke_data_ready_ = false;
     int current_stroke_idx_ = 0;
@@ -83,6 +81,9 @@ protected:
                int height);
 
 public:
+    struct StrokePoint { int16_t x; int16_t y; };
+    using Stroke = std::vector<StrokePoint>;
+
     ~LcdDisplay();
     virtual void SetStatus(const char* status) override;
     virtual void SetEmotion(const char* emotion) override;

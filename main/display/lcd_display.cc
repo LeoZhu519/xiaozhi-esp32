@@ -1559,8 +1559,16 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch, const std::string& piny
                                     int ry = cJSON_GetArrayItem(pt, 1)->valueint;
                                     int sx = rx * 180 / 1024;
                                     int sy = (900 - ry) * 180 / 1024;
-                                    if (sx < 0) sx = 0; if (sx >= 180) sx = 179;
-                                    if (sy < 0) sy = 0; if (sy >= 180) sy = 179;
+                                    if (sx < 0) {
+                                        sx = 0;
+                                    } else if (sx >= 180) {
+                                        sx = 179;
+                                    }
+                                    if (sy < 0) {
+                                        sy = 0;
+                                    } else if (sy >= 180) {
+                                        sy = 179;
+                                    }
                                     current_stroke.push_back({(int16_t)sx, (int16_t)sy});
                                 }
                             }
