@@ -1260,8 +1260,8 @@ static std::string UrlEncodeUtf8(const std::string& str) {
     return encoded;
 }
 
-// Draw thick line segment with round caps onto ARGB8888 180x180 buffer
-static void DrawThickSegment(uint32_t* buf, int x0, int y0, int x1, int y1, uint32_t color, float radius = 5.5f) {
+// Draw thick line segment with round caps onto ARGB8888 180x180 buffer (12px line width)
+static void DrawThickSegment(uint32_t* buf, int x0, int y0, int x1, int y1, uint32_t color, float radius = 6.0f) {
     int min_x = std::max(0, (int)std::floor(std::min(x0, x1) - radius - 1));
     int max_x = std::min(179, (int)std::ceil(std::max(x0, x1) + radius + 1));
     int min_y = std::max(0, (int)std::floor(std::min(y0, y1) - radius - 1));
@@ -1354,6 +1354,9 @@ void LcdDisplay::StopStrokeAnimation() {
     if (stroke_canvas_buf_ != nullptr) {
         free(stroke_canvas_buf_);
         stroke_canvas_buf_ = nullptr;
+    }
+    if (big_char_label_ != nullptr) {
+        lv_obj_remove_flag(big_char_label_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1562,8 +1565,8 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch, const std::string& piny
                                     if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
                                         int rx = cJSON_GetArrayItem(pt, 0)->valueint;
                                         int ry = cJSON_GetArrayItem(pt, 1)->valueint;
-                                        int sx = rx * 180 / 1024;
-                                        int sy = (900 - ry) * 180 / 1024;
+                                        int sx = 16 + rx * 148 / 1024;
+                                        int sy = 16 + (900 - ry) * 148 / 1024;
                                         if (sx < 0) {
                                             sx = 0;
                                         } else if (sx >= 180) {
@@ -1608,9 +1611,9 @@ void LcdDisplay::StartStrokeAnimation() {
         return;
     }
 
-    // Stage 2: Dim full character label to #383838 as tracing base
+    // Hide original static text label to completely avoid dual-font ghosting/misalignment
     if (big_char_label_ != nullptr) {
-        lv_obj_set_style_text_color(big_char_label_, lv_color_hex(0x383838), 0);
+        lv_obj_add_flag(big_char_label_, LV_OBJ_FLAG_HIDDEN);
     }
 
     // Allocate canvas buffer in PSRAM
@@ -1624,7 +1627,6 @@ void LcdDisplay::StartStrokeAnimation() {
         ESP_LOGE(TAG, "Failed to allocate stroke canvas buffer");
         return;
     }
-    memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
 
     if (stroke_canvas_ == nullptr && big_char_tianzige_ != nullptr) {
         stroke_canvas_ = lv_canvas_create(big_char_tianzige_);
@@ -1636,6 +1638,9 @@ void LcdDisplay::StartStrokeAnimation() {
     current_stroke_idx_ = 0;
     current_stroke_progress_ = 0.0f;
     stroke_pause_ticks_ = 0;
+
+    // Immediately render initial frame (homologous gray template + first frame)
+    OnStrokeTick();
 
     if (stroke_timer_ != nullptr) {
         esp_timer_stop(stroke_timer_);
@@ -1652,12 +1657,42 @@ void LcdDisplay::OnStrokeTick() {
         return;
     }
 
+    auto render_frame = [this](bool all_completed) {
+        memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+
+        // Redraw Tianzige red lines (1px #882222)
+        for (int x = 2; x < 178; ++x) {
+            stroke_canvas_buf_[90 * 180 + x] = 0xFF882222;
+        }
+        for (int y = 2; y < 178; ++y) {
+            stroke_canvas_buf_[y * 180 + 90] = 0xFF882222;
+        }
+
+        // Layer 1: 100% homologous deep gray #383838 tracing template (all strokes, 12px width)
+        for (const auto& s : stroke_data_) {
+            DrawStroke(stroke_canvas_buf_, s, 1.0f, 0xFF383838);
+        }
+
+        // Layer 2: Completed strokes in bright white #FFFFFF (12px width)
+        int completed_count = all_completed ? (int)stroke_data_.size() : current_stroke_idx_;
+        for (int i = 0; i < completed_count; ++i) {
+            DrawStroke(stroke_canvas_buf_, stroke_data_[i], 1.0f, 0xFFFFFFFF);
+        }
+
+        // Layer 3: Currently active stroke in bright golden yellow #FFD700 (12px width)
+        if (!all_completed && current_stroke_idx_ < (int)stroke_data_.size()) {
+            DrawStroke(stroke_canvas_buf_, stroke_data_[current_stroke_idx_], current_stroke_progress_, 0xFFFFD700);
+        }
+
+        lv_obj_invalidate(stroke_canvas_);
+    };
+
     if (stroke_pause_ticks_ > 0) {
         stroke_pause_ticks_--;
         if (stroke_pause_ticks_ == 0) {
             current_stroke_idx_ = 0;
             current_stroke_progress_ = 0.0f;
-            memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+            render_frame(false);
         }
         return;
     }
@@ -1667,34 +1702,23 @@ void LcdDisplay::OnStrokeTick() {
         current_stroke_progress_ = 0.0f;
         current_stroke_idx_++;
         if (current_stroke_idx_ >= (int)stroke_data_.size()) {
-            memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
-            for (const auto& s : stroke_data_) {
-                DrawStroke(stroke_canvas_buf_, s, 1.0f, 0xFFFFFFFF);
-            }
+            render_frame(true);
             if (big_char_progress_label_ != nullptr) {
                 char pbuf[32];
                 snprintf(pbuf, sizeof(pbuf), "第 %d / %d 画", (int)stroke_data_.size(), (int)stroke_data_.size());
                 lv_label_set_text(big_char_progress_label_, pbuf);
             }
-            lv_obj_invalidate(stroke_canvas_);
             stroke_pause_ticks_ = 37; // 1.5s pause
             return;
         }
     }
 
-    memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
-    for (int i = 0; i < current_stroke_idx_; ++i) {
-        DrawStroke(stroke_canvas_buf_, stroke_data_[i], 1.0f, 0xFFFFFFFF);
-    }
-    if (current_stroke_idx_ < (int)stroke_data_.size()) {
-        DrawStroke(stroke_canvas_buf_, stroke_data_[current_stroke_idx_], current_stroke_progress_, 0xFFFFD700);
-    }
+    render_frame(false);
     if (big_char_progress_label_ != nullptr) {
         char pbuf[32];
         snprintf(pbuf, sizeof(pbuf), "第 %d / %d 画", current_stroke_idx_ + 1, (int)stroke_data_.size());
         lv_label_set_text(big_char_progress_label_, pbuf);
     }
-    lv_obj_invalidate(stroke_canvas_);
 }
 
 bool LcdDisplay::StartPomodoro(int focus_minutes, int break_minutes) {
