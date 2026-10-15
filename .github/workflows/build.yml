@@ -103,3 +103,5 @@ jobs:
           name: xiaozhi_${{ matrix.ci_name || matrix.full_name }}_${{ github.sha }}
           path: build/merged-binary.bin
           if-no-files-found: error
+
+# Trigger CI re-evaluation: 2026-10-15
