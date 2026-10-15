@@ -91,14 +91,49 @@ void McpServer::AddCommonTools() {
 
     if (display) {
         AddTool("self.screen.show_character",
-                "当用户询问汉字怎么写、汉字笔画结构，或要求在屏幕上显示指定大字时调用此工具。",
-                PropertyList({Property("character", kPropertyTypeString)}),
+                "当用户询问汉字怎么写、汉字笔画结构，或要求在屏幕上显示指定大字时调用此工具。请务必同时提供汉字对应的带声调拼音（例如 \"pān\"、\"mǎ\"）。\n"
+                "Args:\n"
+                "  `character`: 目标汉字（单字）。\n"
+                "  `pinyin`: 该汉字的完整拼音（必须带声调，如 \"pān\"）。",
+                PropertyList({
+                    Property("character", kPropertyTypeString),
+                    Property("pinyin", kPropertyTypeString, std::string(""))
+                }),
                 [](const PropertyList& properties) -> ReturnValue {
                     auto character = properties["character"].value<std::string>();
+                    auto pinyin = properties["pinyin"].value<std::string>();
                     auto disp = Display::GetInstance();
                     if (disp != nullptr) {
-                        disp->ShowBigCharacter(character);
+                        disp->ShowBigCharacter(character, pinyin);
                         return true;
+                    }
+                    return false;
+                });
+
+        AddTool("self.timer.pomodoro",
+                "当用户要求开启番茄钟、定时学习、专注倒计时或取消定时时调用此工具。\n"
+                "Args:\n"
+                "  `action`: 操作类型，\"start\" 为开启或重置番茄钟，\"stop\" 为提前结束并取消番茄钟。默认 \"start\"。\n"
+                "  `focus_minutes`: 专注工作学习时长（分钟），默认 25，范围 1~120。\n"
+                "  `break_minutes`: 休息时长（分钟），默认 5，范围 1~60。",
+                PropertyList({
+                    Property("action", kPropertyTypeString, std::string("start")),
+                    Property("focus_minutes", kPropertyTypeInteger, 25, 1, 120),
+                    Property("break_minutes", kPropertyTypeInteger, 5, 1, 60)
+                }),
+                [](const PropertyList& properties) -> ReturnValue {
+                    auto action = properties["action"].value<std::string>();
+                    int focus_min = properties["focus_minutes"].value<int>();
+                    int break_min = properties["break_minutes"].value<int>();
+                    auto disp = Display::GetInstance();
+                    if (disp != nullptr) {
+                        if (action == "stop") {
+                            disp->StopPomodoro();
+                            return std::string("番茄钟已停止");
+                        } else {
+                            disp->StartPomodoro(focus_min, break_min);
+                            return std::string("番茄钟已开启，专注 ") + std::to_string(focus_min) + " 分钟，休息 " + std::to_string(break_min) + " 分钟";
+                        }
                     }
                     return false;
                 });

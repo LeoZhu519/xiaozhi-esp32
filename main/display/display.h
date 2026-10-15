@@ -41,7 +41,9 @@ public:
     virtual ~Display();
 
     static Display* GetInstance();
-    virtual void ShowBigCharacter(const std::string& ch) { (void)ch; }
+    virtual void ShowBigCharacter(const std::string& ch, const std::string& pinyin = "") { (void)ch; (void)pinyin; }
+    virtual bool StartPomodoro(int focus_minutes = 25, int break_minutes = 5) { return false; }
+    virtual bool StopPomodoro() { return false; }
 
     virtual void SetStatus(const char* status);
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);

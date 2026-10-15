@@ -15,8 +15,12 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <cmath>
+#include <cJSON.h>
 
 #include "board.h"
+#include "assets.h"
+#include "application.h"
 
 #define TAG "LcdDisplay"
 
@@ -109,6 +113,42 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
         .skip_unhandled_events = false,
     };
     esp_timer_create(&big_char_timer_args, &big_char_timer_);
+
+    // Timer for stroke animation ticks (40ms)
+    esp_timer_create_args_t stroke_timer_args = {
+        .callback = [](void* arg) {
+            static_cast<LcdDisplay*>(arg)->OnStrokeTick();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "stroke_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&stroke_timer_args, &stroke_timer_);
+
+    // Timer to trigger Stage 2 stroke animation after 2.5s
+    esp_timer_create_args_t stroke_s2_args = {
+        .callback = [](void* arg) {
+            static_cast<LcdDisplay*>(arg)->StartStrokeAnimation();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "stroke_s2",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&stroke_s2_args, &stroke_stage2_timer_);
+
+    // Timer for 1-second pomodoro ticks
+    esp_timer_create_args_t pomodoro_timer_args = {
+        .callback = [](void* arg) {
+            static_cast<LcdDisplay*>(arg)->OnPomodoroTick();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "pomodoro_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&pomodoro_timer_args, &pomodoro_timer_);
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -353,6 +393,29 @@ LcdDisplay::~LcdDisplay() {
         esp_timer_stop(big_char_timer_);
         esp_timer_delete(big_char_timer_);
         big_char_timer_ = nullptr;
+    }
+
+    if (stroke_timer_ != nullptr) {
+        esp_timer_stop(stroke_timer_);
+        esp_timer_delete(stroke_timer_);
+        stroke_timer_ = nullptr;
+    }
+
+    if (stroke_stage2_timer_ != nullptr) {
+        esp_timer_stop(stroke_stage2_timer_);
+        esp_timer_delete(stroke_stage2_timer_);
+        stroke_stage2_timer_ = nullptr;
+    }
+
+    if (pomodoro_timer_ != nullptr) {
+        esp_timer_stop(pomodoro_timer_);
+        esp_timer_delete(pomodoro_timer_);
+        pomodoro_timer_ = nullptr;
+    }
+
+    if (stroke_canvas_buf_ != nullptr) {
+        free(stroke_canvas_buf_);
+        stroke_canvas_buf_ = nullptr;
     }
 
     if (big_char_container_ != nullptr) {
@@ -1155,15 +1218,118 @@ void LcdDisplay::ClearChatMessages() {
 #endif
 
 #if LV_USE_TINY_TTF
-extern const uint8_t kaiti_subset_ttf_start[] asm("_binary_kaiti_subset_ttf_start");
-extern const uint8_t kaiti_subset_ttf_end[]   asm("_binary_kaiti_subset_ttf_end");
+static lv_font_t* s_kaiti_136 = nullptr;
+static lv_font_t* s_kaiti_24 = nullptr;
+
+static void EnsureKaitiFonts() {
+    if (s_kaiti_136 == nullptr || s_kaiti_24 == nullptr) {
+        void* ptr = nullptr;
+        size_t size = 0;
+        if (Assets::GetInstance().GetAssetData("kaiti_full.ttf", ptr, size)) {
+            if (s_kaiti_136 == nullptr) {
+                s_kaiti_136 = lv_tiny_ttf_create_data(ptr, size, 136);
+                if (s_kaiti_136 == nullptr) {
+                    ESP_LOGE(TAG, "Failed to create 136px tiny_ttf kaiti font");
+                }
+            }
+            if (s_kaiti_24 == nullptr) {
+                s_kaiti_24 = lv_tiny_ttf_create_data(ptr, size, 24);
+                if (s_kaiti_24 == nullptr) {
+                    ESP_LOGE(TAG, "Failed to create 24px tiny_ttf kaiti font");
+                }
+            }
+        } else {
+            ESP_LOGW(TAG, "kaiti_full.ttf not found in assets partition");
+        }
+    }
+}
 #endif
+
+// URL Encode single UTF-8 character string
+static std::string UrlEncodeUtf8(const std::string& str) {
+    std::string encoded;
+    char hex[4];
+    for (unsigned char c : str) {
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+            encoded += c;
+        } else {
+            snprintf(hex, sizeof(hex), "%%%02X", c);
+            encoded += hex;
+        }
+    }
+    return encoded;
+}
+
+// Draw thick line segment with round caps onto ARGB8888 180x180 buffer
+static void DrawThickSegment(uint32_t* buf, int x0, int y0, int x1, int y1, uint32_t color, float radius = 5.5f) {
+    int min_x = std::max(0, (int)std::floor(std::min(x0, x1) - radius - 1));
+    int max_x = std::min(179, (int)std::ceil(std::max(x0, x1) + radius + 1));
+    int min_y = std::max(0, (int)std::floor(std::min(y0, y1) - radius - 1));
+    int max_y = std::min(179, (int)std::ceil(std::max(y0, y1) + radius + 1));
+    float r2 = radius * radius;
+    float dx = (float)(x1 - x0);
+    float dy = (float)(y1 - y0);
+    float l2 = dx * dx + dy * dy;
+
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            float d2;
+            if (l2 < 0.001f) {
+                float ddx = (float)(x - x0);
+                float ddy = (float)(y - y0);
+                d2 = ddx * ddx + ddy * ddy;
+            } else {
+                float t = (((float)x - x0) * dx + ((float)y - y0) * dy) / l2;
+                if (t < 0.0f) t = 0.0f;
+                else if (t > 1.0f) t = 1.0f;
+                float nx = (float)x0 + t * dx;
+                float ny = (float)y0 + t * dy;
+                float ddx = (float)x - nx;
+                float ddy = (float)y - ny;
+                d2 = ddx * ddx + ddy * ddy;
+            }
+            if (d2 <= r2) {
+                buf[y * 180 + x] = color;
+            }
+        }
+    }
+}
+
+// Draw full or partial stroke
+static void DrawStroke(uint32_t* buf, const LcdDisplay::Stroke& s, float progress, uint32_t color) {
+    if (s.size() < 2) return;
+    float total_len = 0.0f;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+        float dx = (float)(s[i+1].x - s[i].x);
+        float dy = (float)(s[i+1].y - s[i].y);
+        total_len += std::sqrt(dx * dx + dy * dy);
+    }
+    if (total_len < 0.1f) return;
+    float target_len = progress * total_len;
+    float cur_accum = 0.0f;
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+        float dx = (float)(s[i+1].x - s[i].x);
+        float dy = (float)(s[i+1].y - s[i].y);
+        float seg_len = std::sqrt(dx * dx + dy * dy);
+        if (cur_accum + seg_len <= target_len) {
+            DrawThickSegment(buf, s[i].x, s[i].y, s[i+1].x, s[i+1].y, color);
+            cur_accum += seg_len;
+        } else {
+            float rem = target_len - cur_accum;
+            float t = seg_len > 0.001f ? (rem / seg_len) : 0.0f;
+            int ex = s[i].x + (int)std::round(t * dx);
+            int ey = s[i].y + (int)std::round(t * dy);
+            DrawThickSegment(buf, s[i].x, s[i].y, ex, ey, color);
+            break;
+        }
+    }
+}
 
 void LcdDisplay::SetStatus(const char* status) {
     LvglDisplay::SetStatus(status);
     if (big_char_container_ != nullptr && status != nullptr) {
         int64_t elapsed_us = esp_timer_get_time() - big_char_show_time_;
-        if (elapsed_us >= 6000000LL) {
+        if (elapsed_us >= 10000000LL) { // 10 seconds anti-premature-dismissal lock
             if (strcmp(status, Lang::Strings::LISTENING) == 0 ||
                 strstr(status, "聆听") != nullptr ||
                 strstr(status, "Listen") != nullptr) {
@@ -1173,15 +1339,41 @@ void LcdDisplay::SetStatus(const char* status) {
     }
 }
 
+void LcdDisplay::StopStrokeAnimation() {
+    if (stroke_timer_ != nullptr) {
+        esp_timer_stop(stroke_timer_);
+    }
+    if (stroke_stage2_timer_ != nullptr) {
+        esp_timer_stop(stroke_stage2_timer_);
+    }
+    if (stroke_canvas_ != nullptr) {
+        lv_obj_del(stroke_canvas_);
+        stroke_canvas_ = nullptr;
+    }
+    if (stroke_canvas_buf_ != nullptr) {
+        free(stroke_canvas_buf_);
+        stroke_canvas_buf_ = nullptr;
+    }
+}
+
 void LcdDisplay::DismissBigCharacter() {
     DisplayLockGuard lock(this);
     if (big_char_timer_ != nullptr) {
         esp_timer_stop(big_char_timer_);
     }
+    StopStrokeAnimation();
+
     if (big_char_container_ != nullptr) {
         lv_obj_del(big_char_container_);
         big_char_container_ = nullptr;
+        big_char_pinyin_label_ = nullptr;
+        big_char_tianzige_ = nullptr;
+        big_char_label_ = nullptr;
+        big_char_progress_label_ = nullptr;
     }
+    stroke_data_.clear();
+    stroke_data_ready_ = false;
+
     // Restore emoji_box_
     if (emoji_box_ != nullptr) {
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
@@ -1191,7 +1383,7 @@ void LcdDisplay::DismissBigCharacter() {
     }
 }
 
-void LcdDisplay::ShowBigCharacter(const std::string& ch) {
+void LcdDisplay::ShowBigCharacter(const std::string& ch, const std::string& pinyin) {
     if (ch.empty()) {
         DismissBigCharacter();
         return;
@@ -1199,10 +1391,11 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
 
     DisplayLockGuard lock(this);
 
-    // Stop current dismiss timer if active
+    // Stop current timers & animations if active
     if (big_char_timer_ != nullptr) {
         esp_timer_stop(big_char_timer_);
     }
+    StopStrokeAnimation();
 
     // Hide emoji controls
     if (gif_controller_) {
@@ -1215,29 +1408,55 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Recreate big_char_container_ if it already exists
+    // Recreate container if existing
     if (big_char_container_ != nullptr) {
         lv_obj_del(big_char_container_);
         big_char_container_ = nullptr;
     }
+    stroke_data_.clear();
+    stroke_data_ready_ = false;
 
-    // Record show timestamp for anti-premature-dismissal lock (6 seconds)
+    // Record show timestamp for anti-premature-dismissal lock (10 seconds)
     big_char_show_time_ = esp_timer_get_time();
+
+#if LV_USE_TINY_TTF
+    EnsureKaitiFonts();
+#endif
 
     auto screen = lv_screen_active();
     big_char_container_ = lv_obj_create(screen);
-    lv_obj_set_size(big_char_container_, 180, 180);
-    lv_obj_align(big_char_container_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(big_char_container_, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(big_char_container_, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(big_char_container_, 6, 0);
-    lv_obj_set_style_border_color(big_char_container_, lv_color_hex(0x882222), 0);
-    lv_obj_set_style_border_width(big_char_container_, 2, 0);
+    lv_obj_set_size(big_char_container_, 220, 270);
+    lv_obj_align(big_char_container_, LV_ALIGN_CENTER, 0, 6);
+    lv_obj_set_style_bg_opa(big_char_container_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(big_char_container_, 0, 0);
     lv_obj_set_style_pad_all(big_char_container_, 0, 0);
     lv_obj_clear_flag(big_char_container_, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Top: Pinyin Label (24px)
+    big_char_pinyin_label_ = lv_label_create(big_char_container_);
+    lv_label_set_text(big_char_pinyin_label_, pinyin.c_str());
+    lv_obj_set_style_text_color(big_char_pinyin_label_, lv_color_hex(0x0F172A), 0);
+#if LV_USE_TINY_TTF
+    if (s_kaiti_24 != nullptr) {
+        lv_obj_set_style_text_font(big_char_pinyin_label_, s_kaiti_24, 0);
+    }
+#endif
+    lv_obj_align(big_char_pinyin_label_, LV_ALIGN_TOP_MID, 0, 0);
+
+    // Center: Tianzige 180x180 (#000000, border #882222)
+    big_char_tianzige_ = lv_obj_create(big_char_container_);
+    lv_obj_set_size(big_char_tianzige_, 180, 180);
+    lv_obj_align(big_char_tianzige_, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_set_style_bg_color(big_char_tianzige_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(big_char_tianzige_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(big_char_tianzige_, 6, 0);
+    lv_obj_set_style_border_color(big_char_tianzige_, lv_color_hex(0x882222), 0);
+    lv_obj_set_style_border_width(big_char_tianzige_, 2, 0);
+    lv_obj_set_style_pad_all(big_char_tianzige_, 0, 0);
+    lv_obj_clear_flag(big_char_tianzige_, LV_OBJ_FLAG_SCROLLABLE);
+
     // Tianzige horizontal cross line (1px, #882222)
-    lv_obj_t* line_h = lv_obj_create(big_char_container_);
+    lv_obj_t* line_h = lv_obj_create(big_char_tianzige_);
     lv_obj_set_size(line_h, 176, 1);
     lv_obj_align(line_h, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(line_h, lv_color_hex(0x882222), 0);
@@ -1247,7 +1466,7 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
     lv_obj_clear_flag(line_h, LV_OBJ_FLAG_SCROLLABLE);
 
     // Tianzige vertical cross line (1px, #882222)
-    lv_obj_t* line_v = lv_obj_create(big_char_container_);
+    lv_obj_t* line_v = lv_obj_create(big_char_tianzige_);
     lv_obj_set_size(line_v, 1, 176);
     lv_obj_align(line_v, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(line_v, lv_color_hex(0x882222), 0);
@@ -1256,36 +1475,312 @@ void LcdDisplay::ShowBigCharacter(const std::string& ch) {
     lv_obj_set_style_pad_all(line_v, 0, 0);
     lv_obj_clear_flag(line_v, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Label for target character (136px crisp TrueType vector font)
-    lv_obj_t* label = lv_label_create(big_char_container_);
-    lv_label_set_text(label, ch.c_str());
-    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
-
+    // Stage 1: Full character label (136px crisp TrueType vector font, bright white #FFFFFF)
+    big_char_label_ = lv_label_create(big_char_tianzige_);
+    lv_label_set_text(big_char_label_, ch.c_str());
+    lv_obj_set_style_text_color(big_char_label_, lv_color_hex(0xFFFFFF), 0);
 #if LV_USE_TINY_TTF
-    static lv_font_t* s_kaiti_font_136 = nullptr;
-    if (s_kaiti_font_136 == nullptr) {
-        size_t ttf_size = kaiti_subset_ttf_end - kaiti_subset_ttf_start;
-        s_kaiti_font_136 = lv_tiny_ttf_create_data(kaiti_subset_ttf_start, ttf_size, 136);
-        if (s_kaiti_font_136 == nullptr) {
-            ESP_LOGE(TAG, "Failed to create tiny_ttf font of size 136");
-        }
-    }
-    if (s_kaiti_font_136 != nullptr) {
-        lv_obj_set_style_text_font(label, s_kaiti_font_136, 0);
+    if (s_kaiti_136 != nullptr) {
+        lv_obj_set_style_text_font(big_char_label_, s_kaiti_136, 0);
     } else
 #endif
     {
         LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         if (lvgl_theme != nullptr && lvgl_theme->text_font() != nullptr) {
-            lv_obj_set_style_text_font(label, lvgl_theme->text_font()->font(), 0);
+            lv_obj_set_style_text_font(big_char_label_, lvgl_theme->text_font()->font(), 0);
+        }
+    }
+    lv_obj_align(big_char_label_, LV_ALIGN_CENTER, 0, 0);
+
+    // Bottom: Stroke Progress Label
+    big_char_progress_label_ = lv_label_create(big_char_container_);
+    lv_label_set_text(big_char_progress_label_, "");
+    lv_obj_set_style_text_color(big_char_progress_label_, lv_color_hex(0x0F172A), 0);
+#if LV_USE_TINY_TTF
+    if (s_kaiti_24 != nullptr) {
+        lv_obj_set_style_text_font(big_char_progress_label_, s_kaiti_24, 0);
+    }
+#endif
+    lv_obj_align(big_char_progress_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    // Start 30-second timer (30000 ms = 30,000,000 us)
+    if (big_char_timer_ != nullptr) {
+        esp_timer_start_once(big_char_timer_, 30000 * 1000);
+    }
+
+    // Start Stage 2 trigger timer (2.5 seconds = 2,500,000 us)
+    if (stroke_stage2_timer_ != nullptr) {
+        esp_timer_start_once(stroke_stage2_timer_, 2500 * 1000);
+    }
+
+    // Launch background task to asynchronously fetch stroke medians
+    struct FetchContext {
+        LcdDisplay* display;
+        std::string character;
+    };
+    auto ctx = new FetchContext{this, ch};
+    xTaskCreate([](void* arg) {
+        auto p = static_cast<FetchContext*>(arg);
+        std::string url = "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1/" +
+                          UrlEncodeUtf8(p->character) + ".json";
+        std::string json_str;
+        auto network = Board::GetInstance().GetNetwork();
+        if (network != nullptr) {
+            auto http = network->CreateHttp(0);
+            if (http && http->Open("GET", url)) {
+                auto status = http->GetStatusCode();
+                if (status && *status == 200) {
+                    char buf[512];
+                    while (true) {
+                        auto ret = http->Read(buf, sizeof(buf));
+                        if (!ret || *ret <= 0) break;
+                        json_str.append(buf, *ret);
+                        if (json_str.size() > 65536) break;
+                    }
+                }
+            }
+        }
+        if (!json_str.empty()) {
+            cJSON* root = cJSON_Parse(json_str.c_str());
+            if (root != nullptr) {
+                cJSON* medians = cJSON_GetObjectItem(root, "medians");
+                if (cJSON_IsArray(medians)) {
+                    std::vector<LcdDisplay::Stroke> parsed_strokes;
+                    int stroke_cnt = cJSON_GetArraySize(medians);
+                    for (int i = 0; i < stroke_cnt; ++i) {
+                        cJSON* s_item = cJSON_GetArrayItem(medians, i);
+                        if (cJSON_IsArray(s_item)) {
+                            LcdDisplay::Stroke current_stroke;
+                            int pt_cnt = cJSON_GetArraySize(s_item);
+                            for (int j = 0; j < pt_cnt; ++j) {
+                                cJSON* pt = cJSON_GetArrayItem(s_item, j);
+                                if (cJSON_IsArray(pt) && cJSON_GetArraySize(pt) >= 2) {
+                                    int rx = cJSON_GetArrayItem(pt, 0)->valueint;
+                                    int ry = cJSON_GetArrayItem(pt, 1)->valueint;
+                                    int sx = rx * 180 / 1024;
+                                    int sy = (900 - ry) * 180 / 1024;
+                                    if (sx < 0) sx = 0; if (sx >= 180) sx = 179;
+                                    if (sy < 0) sy = 0; if (sy >= 180) sy = 179;
+                                    current_stroke.push_back({(int16_t)sx, (int16_t)sy});
+                                }
+                            }
+                            if (!current_stroke.empty()) {
+                                parsed_strokes.push_back(std::move(current_stroke));
+                            }
+                        }
+                    }
+                    if (!parsed_strokes.empty()) {
+                        DisplayLockGuard lock(p->display);
+                        p->display->stroke_data_ = std::move(parsed_strokes);
+                        p->display->stroke_data_ready_ = true;
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+        p->display->stroke_fetch_task_ = nullptr;
+        delete p;
+        vTaskDelete(NULL);
+    }, "stroke_fetch", 4096, ctx, 2, &stroke_fetch_task_);
+}
+
+void LcdDisplay::StartStrokeAnimation() {
+    DisplayLockGuard lock(this);
+    if (big_char_container_ == nullptr) {
+        return;
+    }
+    if (!stroke_data_ready_ || stroke_data_.empty()) {
+        ESP_LOGI(TAG, "Stroke medians not available; keeping static white character");
+        return;
+    }
+
+    // Stage 2: Dim full character label to #383838 as tracing base
+    if (big_char_label_ != nullptr) {
+        lv_obj_set_style_text_color(big_char_label_, lv_color_hex(0x383838), 0);
+    }
+
+    // Allocate canvas buffer in PSRAM
+    if (stroke_canvas_buf_ == nullptr) {
+        stroke_canvas_buf_ = (uint32_t*)heap_caps_malloc(180 * 180 * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (stroke_canvas_buf_ == nullptr) {
+            stroke_canvas_buf_ = (uint32_t*)malloc(180 * 180 * sizeof(uint32_t));
+        }
+    }
+    if (stroke_canvas_buf_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate stroke canvas buffer");
+        return;
+    }
+    memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+
+    if (stroke_canvas_ == nullptr && big_char_tianzige_ != nullptr) {
+        stroke_canvas_ = lv_canvas_create(big_char_tianzige_);
+        lv_canvas_set_buffer(stroke_canvas_, stroke_canvas_buf_, 180, 180, LV_COLOR_FORMAT_ARGB8888);
+        lv_obj_align(stroke_canvas_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_clear_flag(stroke_canvas_, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    current_stroke_idx_ = 0;
+    current_stroke_progress_ = 0.0f;
+    stroke_pause_ticks_ = 0;
+
+    if (stroke_timer_ != nullptr) {
+        esp_timer_stop(stroke_timer_);
+        esp_timer_start_periodic(stroke_timer_, 40 * 1000); // 40ms
+    }
+}
+
+void LcdDisplay::OnStrokeTick() {
+    DisplayLockGuard lock(this);
+    if (big_char_container_ == nullptr || stroke_canvas_ == nullptr || stroke_canvas_buf_ == nullptr) {
+        return;
+    }
+    if (stroke_data_.empty()) {
+        return;
+    }
+
+    if (stroke_pause_ticks_ > 0) {
+        stroke_pause_ticks_--;
+        if (stroke_pause_ticks_ == 0) {
+            current_stroke_idx_ = 0;
+            current_stroke_progress_ = 0.0f;
+            memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+        }
+        return;
+    }
+
+    current_stroke_progress_ += 0.12f;
+    if (current_stroke_progress_ >= 1.0f) {
+        current_stroke_progress_ = 0.0f;
+        current_stroke_idx_++;
+        if (current_stroke_idx_ >= (int)stroke_data_.size()) {
+            memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+            for (const auto& s : stroke_data_) {
+                DrawStroke(stroke_canvas_buf_, s, 1.0f, 0xFFFFFFFF);
+            }
+            if (big_char_progress_label_ != nullptr) {
+                char pbuf[32];
+                snprintf(pbuf, sizeof(pbuf), "第 %d / %d 画", (int)stroke_data_.size(), (int)stroke_data_.size());
+                lv_label_set_text(big_char_progress_label_, pbuf);
+            }
+            lv_obj_invalidate(stroke_canvas_);
+            stroke_pause_ticks_ = 37; // 1.5s pause
+            return;
         }
     }
 
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+    memset(stroke_canvas_buf_, 0, 180 * 180 * sizeof(uint32_t));
+    for (int i = 0; i < current_stroke_idx_; ++i) {
+        DrawStroke(stroke_canvas_buf_, stroke_data_[i], 1.0f, 0xFFFFFFFF);
+    }
+    if (current_stroke_idx_ < (int)stroke_data_.size()) {
+        DrawStroke(stroke_canvas_buf_, stroke_data_[current_stroke_idx_], current_stroke_progress_, 0xFFFFD700);
+    }
+    if (big_char_progress_label_ != nullptr) {
+        char pbuf[32];
+        snprintf(pbuf, sizeof(pbuf), "第 %d / %d 画", current_stroke_idx_ + 1, (int)stroke_data_.size());
+        lv_label_set_text(big_char_progress_label_, pbuf);
+    }
+    lv_obj_invalidate(stroke_canvas_);
+}
 
-    // Start 12-second timer (12000 ms = 12,000,000 us)
-    if (big_char_timer_ != nullptr) {
-        esp_timer_start_once(big_char_timer_, 12000 * 1000);
+bool LcdDisplay::StartPomodoro(int focus_minutes, int break_minutes) {
+    DisplayLockGuard lock(this);
+    if (pomodoro_timer_ == nullptr) {
+        return false;
+    }
+    esp_timer_stop(pomodoro_timer_);
+
+    pomodoro_focus_sec_ = focus_minutes * 60;
+    pomodoro_break_sec_ = break_minutes * 60;
+    pomodoro_remaining_sec_ = pomodoro_focus_sec_;
+    pomodoro_state_ = PomodoroState::kFocus;
+
+#if LV_USE_TINY_TTF
+    EnsureKaitiFonts();
+#endif
+
+    auto screen = lv_screen_active();
+    if (pomodoro_badge_ == nullptr) {
+        pomodoro_badge_ = lv_obj_create(screen);
+        lv_obj_set_size(pomodoro_badge_, 140, 28);
+        lv_obj_align(pomodoro_badge_, LV_ALIGN_TOP_MID, 0, 252);
+        lv_obj_set_style_radius(pomodoro_badge_, 14, 0);
+        lv_obj_set_style_bg_opa(pomodoro_badge_, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_all(pomodoro_badge_, 0, 0);
+        lv_obj_clear_flag(pomodoro_badge_, LV_OBJ_FLAG_SCROLLABLE);
+
+        pomodoro_label_ = lv_label_create(pomodoro_badge_);
+        lv_obj_align(pomodoro_label_, LV_ALIGN_CENTER, 0, 0);
+#if LV_USE_TINY_TTF
+        if (s_kaiti_24 != nullptr) {
+            lv_obj_set_style_text_font(pomodoro_label_, s_kaiti_24, 0);
+        }
+#endif
+    }
+
+    lv_obj_set_style_bg_color(pomodoro_badge_, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_border_color(pomodoro_badge_, lv_color_hex(0xFFB300), 0);
+    lv_obj_set_style_border_width(pomodoro_badge_, 1, 0);
+    lv_obj_set_style_text_color(pomodoro_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_remove_flag(pomodoro_badge_, LV_OBJ_FLAG_HIDDEN);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "专注中 %02d:00", focus_minutes);
+    lv_label_set_text(pomodoro_label_, buf);
+
+    esp_timer_start_periodic(pomodoro_timer_, 1000 * 1000);
+    SetEmotion("neutral");
+    return true;
+}
+
+bool LcdDisplay::StopPomodoro() {
+    DisplayLockGuard lock(this);
+    if (pomodoro_timer_ != nullptr) {
+        esp_timer_stop(pomodoro_timer_);
+    }
+    if (pomodoro_badge_ != nullptr) {
+        lv_obj_add_flag(pomodoro_badge_, LV_OBJ_FLAG_HIDDEN);
+    }
+    pomodoro_state_ = PomodoroState::kIdle;
+    return true;
+}
+
+void LcdDisplay::OnPomodoroTick() {
+    DisplayLockGuard lock(this);
+    if (pomodoro_state_ == PomodoroState::kIdle || pomodoro_badge_ == nullptr) {
+        return;
+    }
+
+    pomodoro_remaining_sec_--;
+    if (pomodoro_remaining_sec_ > 0) {
+        int m = pomodoro_remaining_sec_ / 60;
+        int s = pomodoro_remaining_sec_ % 60;
+        char buf[32];
+        if (pomodoro_state_ == PomodoroState::kFocus) {
+            snprintf(buf, sizeof(buf), "专注中 %02d:%02d", m, s);
+        } else {
+            snprintf(buf, sizeof(buf), "休息一下 %02d:%02d", m, s);
+        }
+        lv_label_set_text(pomodoro_label_, buf);
+    } else {
+        if (pomodoro_state_ == PomodoroState::kFocus) {
+            pomodoro_state_ = PomodoroState::kBreak;
+            pomodoro_remaining_sec_ = pomodoro_break_sec_;
+
+            lv_obj_set_style_bg_color(pomodoro_badge_, lv_color_hex(0x15803D), 0);
+            lv_obj_set_style_border_color(pomodoro_badge_, lv_color_hex(0x22C55E), 0);
+            int m = pomodoro_remaining_sec_ / 60;
+            int s = pomodoro_remaining_sec_ % 60;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "休息一下 %02d:%02d", m, s);
+            lv_label_set_text(pomodoro_label_, buf);
+
+            SetEmotion("laughing");
+            Application::GetInstance().Alert("番茄钟", "专注时间到，开始休息 5 分钟！", "laughing");
+        } else if (pomodoro_state_ == PomodoroState::kBreak) {
+            StopPomodoro();
+            Application::GetInstance().Alert("番茄钟", "休息结束，精力满满！", "happy");
+        }
     }
 }
 
