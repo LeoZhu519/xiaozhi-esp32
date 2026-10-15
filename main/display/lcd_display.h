@@ -15,6 +15,10 @@
 #define PREVIEW_IMAGE_DURATION_MS 5000
 
 class LcdDisplay : public LvglDisplay {
+public:
+    struct StrokePoint { int16_t x; int16_t y; };
+    using Stroke = std::vector<StrokePoint>;
+
 protected:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
@@ -81,9 +85,6 @@ protected:
                int height);
 
 public:
-    struct StrokePoint { int16_t x; int16_t y; };
-    using Stroke = std::vector<StrokePoint>;
-
     ~LcdDisplay();
     virtual void SetStatus(const char* status) override;
     virtual void SetEmotion(const char* emotion) override;
