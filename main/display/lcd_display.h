@@ -53,6 +53,7 @@ protected:
     esp_timer_handle_t stroke_stage2_timer_ = nullptr;
     TaskHandle_t stroke_fetch_task_ = nullptr;
     int64_t big_char_show_time_ = 0;
+    bool big_char_show_stroke_ = false;
 
     std::vector<Stroke> stroke_data_;
     bool stroke_data_ready_ = false;
@@ -88,7 +89,7 @@ public:
     ~LcdDisplay();
     virtual void SetStatus(const char* status) override;
     virtual void SetEmotion(const char* emotion) override;
-    virtual void ShowBigCharacter(const std::string& ch, const std::string& pinyin = "") override;
+    virtual void ShowBigCharacter(const std::string& ch, const std::string& pinyin = "", bool show_stroke = false) override;
     virtual void DismissBigCharacter();
     virtual bool StartPomodoro(int focus_minutes = 25, int break_minutes = 5) override;
     virtual bool StopPomodoro() override;

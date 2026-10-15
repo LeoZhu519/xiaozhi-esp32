@@ -94,17 +94,20 @@ void McpServer::AddCommonTools() {
                 "当用户询问汉字怎么写、汉字笔画结构，或要求在屏幕上显示指定大字时调用此工具。请务必同时提供汉字对应的带声调拼音（例如 \"pān\"、\"mǎ\"）。\n"
                 "Args:\n"
                 "  `character`: 目标汉字（单字）。\n"
-                "  `pinyin`: 该汉字的完整拼音（必须带声调，如 \"pān\"）。",
+                "  `pinyin`: 该汉字的完整拼音（必须带声调，如 \"pān\"）。\n"
+                "  `show_stroke`: 是否演示动态笔顺描红动画。默认 false。当用户仅询问某字怎么写、长什么样或字形结构时设为 false（仅显示静态楷体大字）；只有当用户明确询问‘笔顺’、‘笔画’、‘第几笔是什么’或要求演示书写过程时才设为 true。",
                 PropertyList({
                     Property("character", kPropertyTypeString),
-                    Property("pinyin", kPropertyTypeString, std::string(""))
+                    Property("pinyin", kPropertyTypeString, std::string("")),
+                    Property("show_stroke", kPropertyTypeBoolean, false)
                 }),
                 [](const PropertyList& properties) -> ReturnValue {
                     auto character = properties["character"].value<std::string>();
                     auto pinyin = properties["pinyin"].value<std::string>();
+                    bool show_stroke = properties["show_stroke"].value<bool>();
                     auto disp = Display::GetInstance();
                     if (disp != nullptr) {
-                        disp->ShowBigCharacter(character, pinyin);
+                        disp->ShowBigCharacter(character, pinyin, show_stroke);
                         return true;
                     }
                     return false;
