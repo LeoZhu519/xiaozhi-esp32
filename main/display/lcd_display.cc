@@ -33,13 +33,13 @@ void LcdDisplay::InitializeLcdThemes() {
 
     // light theme
     auto light_theme = new LvglTheme("light");
-    light_theme->set_background_color(lv_color_hex(0xDEEFF7));
-    light_theme->set_text_color(lv_color_hex(0x1E293B));
-    light_theme->set_chat_background_color(lv_color_hex(0xDEEFF7));
+    light_theme->set_background_color(lv_color_hex(0x7B98B5));
+    light_theme->set_text_color(lv_color_hex(0x0F172A));
+    light_theme->set_chat_background_color(lv_color_hex(0x7B98B5));
     light_theme->set_user_bubble_color(lv_color_hex(0x93C5FD));
     light_theme->set_assistant_bubble_color(lv_color_hex(0xE2E8F0));
-    light_theme->set_system_bubble_color(lv_color_hex(0xDEEFF7));
-    light_theme->set_system_text_color(lv_color_hex(0x1E293B));
+    light_theme->set_system_bubble_color(lv_color_hex(0x7B98B5));
+    light_theme->set_system_text_color(lv_color_hex(0x0F172A));
     light_theme->set_border_color(lv_color_hex(0xCBD5E1));
     light_theme->set_low_battery_color(lv_color_hex(0xEF4444));
     light_theme->set_text_font(text_font);
